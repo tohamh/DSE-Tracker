@@ -7,20 +7,18 @@ export interface Holding {
   avgBuyPrice: number;
   totalCost: number;
   realizedPnL: number;
-  currentValue: number; // For now, we assume current price = avg buy price if not available
+  currentValue: number;
 }
 
 export function calculatePortfolioStats(
   transactions: Transaction[],
   activePortfolio: PortfolioType
 ) {
-  // Portfolio-specific calculations
   const filteredTransactions = transactions.filter((t) => {
     if (activePortfolio === "Global") return true;
     return t.portfolio === activePortfolio || t.portfolio === "Global";
   });
 
-  // Sort transactions by date and then by type priority to ensure Buy comes before Sell on same day
   const typePriority: Record<string, number> = {
     "Deposit": 1,
     "Buy": 2,
@@ -35,21 +33,22 @@ export function calculatePortfolioStats(
     return (typePriority[a.type] || 99) - (typePriority[b.type] || 99);
   });
 
+  // ── Direct accumulators (used for cash balance) ──
   let totalDeposits = 0;
   let totalWithdrawals = 0;
-  let totalCharges = 0;
-  let totalDividends = 0;
+  let totalCharges = 0;     // always positive, always subtracted
+  let totalDividends = 0;   // always positive, always added
   let totalCommission = 0;
   let totalBought = 0;
   let totalSold = 0;
   let totalCostOfSold = 0;
 
-  const holdingsMap: Record<string, { 
-    qty: number; 
-    totalCost: number; 
-    realizedPnL: number; 
-    costOfSold: number; 
-    dividends: number; 
+  const holdingsMap: Record<string, {
+    qty: number;
+    totalCost: number;
+    realizedPnL: number;
+    costOfSold: number;
+    dividends: number;
     charges: number;
     companyName: string;
     totalBoughtQty: number;
@@ -59,56 +58,58 @@ export function calculatePortfolioStats(
   }> = {};
 
   sortedTransactions.forEach((t) => {
-    totalCommission += t.commission;
+    totalCommission += t.commission || 0;
 
     if (t.type === "Deposit") {
-      totalDeposits += t.total;
+      totalDeposits += Math.abs(t.total);
+
     } else if (t.type === "Withdrawal") {
-      totalWithdrawals += t.total;
+      totalWithdrawals += Math.abs(t.total);
+
     } else if (t.type === "Charge") {
-      // User Request: When "Trading" is selected, Dividend = 0, Charge = 0.
-      const shouldInclude = activePortfolio !== "Trading";
-      
-      if (shouldInclude) {
-        totalCharges += t.total;
+      // ✅ FIX: always treat charge as positive and subtract from balance
+      const chargeAmount = Math.abs(t.total);
+      if (activePortfolio !== "Trading") {
+        totalCharges += chargeAmount;
       }
-      
-      const key = `${t.portfolio}|${t.ticker}`;
       if (t.ticker) {
+        const key = `${t.portfolio}|${t.ticker}`;
         if (!holdingsMap[key]) {
-          holdingsMap[key] = { 
-            qty: 0, totalCost: 0, realizedPnL: 0, costOfSold: 0, dividends: 0, charges: 0, companyName: t.companyName,
+          holdingsMap[key] = {
+            qty: 0, totalCost: 0, realizedPnL: 0, costOfSold: 0,
+            dividends: 0, charges: 0, companyName: t.companyName,
             totalBoughtQty: 0, totalBoughtCost: 0, totalSoldQty: 0, totalSoldValue: 0
           };
         }
-        if (shouldInclude) {
-          holdingsMap[key].charges += t.total;
+        if (activePortfolio !== "Trading") {
+          holdingsMap[key].charges += chargeAmount;
         }
       }
+
     } else if (t.type === "Dividend") {
-      // User Request: When "Trading" is selected, Dividend = 0, Charge = 0.
-      const shouldInclude = activePortfolio !== "Trading";
-      
-      if (shouldInclude) {
-        totalDividends += t.total;
+      const dividendAmount = Math.abs(t.total);
+      if (activePortfolio !== "Trading") {
+        totalDividends += dividendAmount;
       }
-      
       const key = `${t.portfolio}|${t.ticker}`;
       if (!holdingsMap[key]) {
-        holdingsMap[key] = { 
-          qty: 0, totalCost: 0, realizedPnL: 0, costOfSold: 0, dividends: 0, charges: 0, companyName: t.companyName,
+        holdingsMap[key] = {
+          qty: 0, totalCost: 0, realizedPnL: 0, costOfSold: 0,
+          dividends: 0, charges: 0, companyName: t.companyName,
           totalBoughtQty: 0, totalBoughtCost: 0, totalSoldQty: 0, totalSoldValue: 0
         };
       }
-      if (shouldInclude) {
-        holdingsMap[key].dividends += t.total;
+      if (activePortfolio !== "Trading") {
+        holdingsMap[key].dividends += dividendAmount;
       }
+
     } else if (t.type === "Buy") {
       totalBought += t.total;
       const key = `${t.portfolio}|${t.ticker}`;
       if (!holdingsMap[key]) {
-        holdingsMap[key] = { 
-          qty: 0, totalCost: 0, realizedPnL: 0, costOfSold: 0, dividends: 0, charges: 0, companyName: t.companyName,
+        holdingsMap[key] = {
+          qty: 0, totalCost: 0, realizedPnL: 0, costOfSold: 0,
+          dividends: 0, charges: 0, companyName: t.companyName,
           totalBoughtQty: 0, totalBoughtCost: 0, totalSoldQty: 0, totalSoldValue: 0
         };
       }
@@ -116,21 +117,22 @@ export function calculatePortfolioStats(
       holdingsMap[key].totalCost += t.total;
       holdingsMap[key].totalBoughtQty += t.qty;
       holdingsMap[key].totalBoughtCost += t.total;
+
     } else if (t.type === "Sell") {
       totalSold += t.total;
       const key = `${t.portfolio}|${t.ticker}`;
-      if (holdingsMap[key]) {
+      if (holdingsMap[key] && holdingsMap[key].qty > 0) {
         const avgCost = holdingsMap[key].totalCost / holdingsMap[key].qty;
         const costOfSold = t.qty * avgCost;
         const pnl = t.total - costOfSold;
-        
+
         holdingsMap[key].realizedPnL += pnl;
         holdingsMap[key].costOfSold += costOfSold;
         holdingsMap[key].qty -= t.qty;
         holdingsMap[key].totalCost -= costOfSold;
         holdingsMap[key].totalSoldQty += t.qty;
         holdingsMap[key].totalSoldValue += t.total;
-        
+
         totalCostOfSold += costOfSold;
 
         if (holdingsMap[key].qty <= 0) {
@@ -140,8 +142,8 @@ export function calculatePortfolioStats(
       }
     }
   });
-  
-  // Aggregate holdings by ticker for display
+
+  // Aggregate holdings by ticker
   const tickerHoldings: Record<string, any> = {};
   Object.entries(holdingsMap).forEach(([key, data]) => {
     const [_, ticker] = key.split("|");
@@ -161,10 +163,10 @@ export function calculatePortfolioStats(
     }
   });
 
-  const currentHoldings: (Holding & { 
-    dividends: number; 
+  const currentHoldings: (Holding & {
+    dividends: number;
     charges: number;
-    netReturn: number; 
+    netReturn: number;
     returnPercent: number;
     pnlPercent: number;
     totalBoughtQty: number;
@@ -174,7 +176,7 @@ export function calculatePortfolioStats(
   })[] = Object.values(tickerHoldings)
     .filter((data) => data.qty > 0 || data.realizedPnL !== 0 || data.dividends !== 0 || data.charges !== 0)
     .map((data) => {
-      const netReturn = data.realizedPnL + data.dividends - Math.abs(data.charges);
+      const netReturn = data.realizedPnL + data.dividends - data.charges;
       return {
         ticker: data.ticker,
         companyName: data.companyName,
@@ -186,7 +188,7 @@ export function calculatePortfolioStats(
         charges: data.charges,
         costOfSold: data.costOfSold,
         netReturn,
-        currentValue: data.totalCost, // Placeholder
+        currentValue: data.totalCost,
         returnPercent: (activePortfolio === "Global" || activePortfolio === "Investment")
           ? (data.totalCost > 0 ? (netReturn / data.totalCost) * 100 : 0)
           : (data.totalBoughtCost > 0 ? (netReturn / data.totalBoughtCost) * 100 : 0),
@@ -200,22 +202,28 @@ export function calculatePortfolioStats(
 
   const totalHoldingCost = currentHoldings.reduce((sum, h) => sum + h.totalCost, 0);
   const totalRealizedPnL = currentHoldings.reduce((sum, h) => sum + h.realizedPnL, 0);
-  const totalDividendsSum = currentHoldings.reduce((sum, h) => sum + h.dividends, 0);
-  const totalReturnSum = totalRealizedPnL + totalDividendsSum - Math.abs(totalCharges);
-  
-  const currentBalance = totalDeposits - totalWithdrawals - totalHoldingCost + totalReturnSum;
-  const portfolioBalance = currentBalance;
-  const investedCapital = totalDeposits - portfolioBalance;
-  
+
+  // ✅ FIX: explicit, unambiguous balance formula
+  // Cash = what you deposited, minus what you withdrew, minus what you spent on stocks still held,
+  //        plus what you got from selling, plus dividends, minus charges
+  const currentBalance =
+    totalDeposits
+    - totalWithdrawals
+    - totalHoldingCost   // cost of currently held stocks (locked in shares)
+    + totalDividends     // cash received from dividends
+    - totalCharges;      // cash paid in charges/fees
+
+  const totalReturnSum = totalRealizedPnL + totalDividends - totalCharges;
+
   const overallReturnPercent = (activePortfolio === "Global" || activePortfolio === "Investment")
     ? (totalHoldingCost > 0 ? (totalReturnSum / totalHoldingCost) * 100 : 0)
     : (totalBought > 0 ? (totalReturnSum / totalBought) * 100 : 0);
-    
+
   const overallPnlPercent = totalCostOfSold > 0 ? (totalRealizedPnL / totalCostOfSold) * 100 : 0;
 
   return {
     currentBalance,
-    portfolioBalance,
+    portfolioBalance: currentBalance,
     totalHoldingCost,
     totalRealizedPnL,
     netReturn: totalReturnSum,
