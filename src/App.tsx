@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect } from "react";
+import { useState, useMemo, useEffect, useCallback } from "react";
 import { 
   LayoutDashboard, 
   ArrowLeftRight, 
@@ -20,7 +20,9 @@ import {
   AlertTriangle,
   Sun,
   Moon,
-  Lock
+  Lock,
+  RefreshCw,
+  WifiOff
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { useLocalStorage } from "./hooks/useLocalStorage";
@@ -48,11 +50,33 @@ import DeleteConfirmationModal from "./components/DeleteConfirmationModal";
 import PinLogin from "./components/PinLogin";
 import ErrorBoundary from "./components/ErrorBoundary";
 
+// ============================================================
+//  🔴 PASTE YOUR GOOGLE APPS SCRIPT URL BELOW (between the quotes)
+// ============================================================
+const GOOGLE_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbxkYwWizWdUHIgs09TMSHhie0nqJ41AcSpgOafe9mwpBn1ZB9nyHzgIW8nBH1vCXRh7/exec";
+// ============================================================
+
 const DEFAULT_PIN = "0923202350";
+
+// Helper to call the Google Sheets API
+async function sheetsAPI(body: object): Promise<{ success: boolean; data?: any; error?: string }> {
+  const response = await fetch(GOOGLE_SCRIPT_URL, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+  return response.json();
+}
 
 export default function App() {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
-  const [transactions, setTransactions] = useLocalStorage<Transaction[]>("dse_transactions", []);
+
+  // Transactions now live in Google Sheets (not localStorage)
+  const [transactions, setTransactions] = useState<Transaction[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
+  const [isSyncing, setIsSyncing] = useState(false);
+  const [syncError, setSyncError] = useState<string | null>(null);
+
+  // Settings, stocks, and dark mode still use localStorage (they are device preferences)
   const [settings, setSettings] = useLocalStorage<Settings>("dse_settings", { commissionRate: 0.40 });
   const [customStocks, setCustomStocks] = useLocalStorage<CustomStock[]>("dse_custom_stocks", []);
   const [activeSection, setActiveSection] = useState<ActiveSection>("Dashboard");
@@ -62,6 +86,45 @@ export default function App() {
   const [transactionToDelete, setTransactionToDelete] = useState<string | null>(null);
   const [editingTransaction, setEditingTransaction] = useState<Transaction | null>(null);
   const [darkMode, setDarkMode] = useLocalStorage<boolean>("dse_dark_mode", true);
+
+  // ── Load transactions from Google Sheets on startup ──
+  const loadFromSheets = useCallback(async () => {
+    setIsLoading(true);
+    setSyncError(null);
+    try {
+      const response = await fetch(GOOGLE_SCRIPT_URL);
+      const json = await response.json();
+      if (json.success) {
+        // Migrate old "All Portfolios" values if any
+        const migrated = (json.data as Transaction[]).map(t =>
+          (t.portfolio as string) === "All Portfolios"
+            ? { ...t, portfolio: "Global" as PortfolioType }
+            : t
+        );
+        setTransactions(migrated);
+      } else {
+        setSyncError("Could not load data: " + (json.error || "unknown error"));
+      }
+    } catch (err) {
+      setSyncError("Cannot connect to Google Sheets. Check your URL or internet connection.");
+    } finally {
+      setIsLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (isAuthenticated) {
+      loadFromSheets();
+    }
+  }, [isAuthenticated, loadFromSheets]);
+
+  useEffect(() => {
+    if (darkMode) {
+      document.documentElement.classList.add("dark");
+    } else {
+      document.documentElement.classList.remove("dark");
+    }
+  }, [darkMode]);
 
   const stats = useMemo(() => calculatePortfolioStats(transactions, activePortfolio), [transactions, activePortfolio]);
   const allStats = useMemo(() => calculatePortfolioStats(transactions, "Global"), [transactions]);
@@ -75,55 +138,139 @@ export default function App() {
     return Array.from(stockMap.values());
   }, [customStocks]);
 
-  useEffect(() => {
-    console.log("Dark mode state changed:", darkMode);
-    if (darkMode) {
-      document.documentElement.classList.add("dark");
-      console.log("Added 'dark' class to html. Current classes:", document.documentElement.className);
-    } else {
-      document.documentElement.classList.remove("dark");
-      console.log("Removed 'dark' class from html. Current classes:", document.documentElement.className);
+  // ── Add or Edit a transaction ──
+  const handleAddTransaction = async (newTransaction: Transaction) => {
+    setIsSyncing(true);
+    setSyncError(null);
+    try {
+      if (editingTransaction) {
+        const result = await sheetsAPI({ action: "update", data: newTransaction });
+        if (result.success) {
+          setTransactions(prev => prev.map(t => t.id === editingTransaction.id ? newTransaction : t));
+        } else {
+          setSyncError("Failed to update transaction.");
+        }
+        setEditingTransaction(null);
+      } else {
+        const result = await sheetsAPI({ action: "add", data: newTransaction });
+        if (result.success) {
+          setTransactions(prev => [newTransaction, ...prev]);
+        } else {
+          setSyncError("Failed to save transaction.");
+        }
+      }
+    } catch {
+      setSyncError("Network error. Transaction not saved.");
+    } finally {
+      setIsSyncing(false);
+      setIsAddModalOpen(false);
     }
-  }, [darkMode]);
-
-  useEffect(() => {
-    const needsMigration = transactions.some(t => t.portfolio === "All Portfolios");
-    if (needsMigration) {
-      const migrated = transactions.map(t => 
-        t.portfolio === "All Portfolios" ? { ...t, portfolio: "Global" as PortfolioType } : t
-      );
-      setTransactions(migrated);
-    }
-  }, [transactions, setTransactions]);
-
-  const handleAddTransaction = (newTransaction: Transaction) => {
-    if (editingTransaction) {
-      const updated = transactions.map(t => t.id === editingTransaction.id ? newTransaction : t);
-      setTransactions(updated);
-      setEditingTransaction(null);
-    } else {
-      setTransactions([newTransaction, ...transactions]);
-    }
-    setIsAddModalOpen(false);
   };
 
-  const handleDeleteTransaction = (id: string) => {
-    setTransactions(transactions.filter(t => t.id !== id));
-    setTransactionToDelete(null);
+  // ── Delete one transaction ──
+  const handleDeleteTransaction = async (id: string) => {
+    setIsSyncing(true);
+    setSyncError(null);
+    try {
+      const result = await sheetsAPI({ action: "delete", id });
+      if (result.success) {
+        setTransactions(prev => prev.filter(t => t.id !== id));
+      } else {
+        setSyncError("Failed to delete transaction.");
+      }
+    } catch {
+      setSyncError("Network error. Transaction not deleted.");
+    } finally {
+      setIsSyncing(false);
+      setTransactionToDelete(null);
+    }
   };
 
-  const handleBulkDelete = (ids: string[]) => {
-    setTransactions(transactions.filter(t => !ids.includes(t.id)));
+  // ── Delete multiple transactions ──
+  const handleBulkDelete = async (ids: string[]) => {
+    setIsSyncing(true);
+    setSyncError(null);
+    try {
+      const result = await sheetsAPI({ action: "bulkDelete", ids });
+      if (result.success) {
+        setTransactions(prev => prev.filter(t => !ids.includes(t.id)));
+      } else {
+        setSyncError("Failed to delete selected transactions.");
+      }
+    } catch {
+      setSyncError("Network error during bulk delete.");
+    } finally {
+      setIsSyncing(false);
+    }
   };
 
-  const handleClearAll = () => {
-    setTransactions([]);
-    setCustomStocks([]);
-    setSettings({ commissionRate: 0.40 });
+  // ── Clear all data ──
+  const handleClearAll = async () => {
+    setIsSyncing(true);
+    setSyncError(null);
+    try {
+      const result = await sheetsAPI({ action: "clearAll" });
+      if (result.success) {
+        setTransactions([]);
+        setCustomStocks([]);
+        setSettings({ commissionRate: 0.40 });
+      } else {
+        setSyncError("Failed to clear data.");
+      }
+    } catch {
+      setSyncError("Network error during clear.");
+    } finally {
+      setIsSyncing(false);
+    }
+  };
+
+  // ── Replace all transactions (used by Import/Export) ──
+  const handleSetTransactions = async (
+    newTransactionsOrFn: Transaction[] | ((prev: Transaction[]) => Transaction[])
+  ) => {
+    const resolved =
+      typeof newTransactionsOrFn === "function"
+        ? newTransactionsOrFn(transactions)
+        : newTransactionsOrFn;
+    setIsSyncing(true);
+    setSyncError(null);
+    try {
+      const result = await sheetsAPI({ action: "replaceAll", data: resolved });
+      if (result.success) {
+        setTransactions(resolved);
+      } else {
+        setSyncError("Failed to import data.");
+      }
+    } catch {
+      setSyncError("Network error during import.");
+    } finally {
+      setIsSyncing(false);
+    }
   };
 
   if (!isAuthenticated) {
     return <PinLogin onSuccess={() => setIsAuthenticated(true)} defaultPin={DEFAULT_PIN} />;
+  }
+
+  // ── Loading screen ──
+  if (isLoading) {
+    return (
+      <div className={cn("h-screen flex flex-col items-center justify-center gap-4 font-sans", darkMode ? "dark bg-slate-950 text-white" : "bg-slate-50 text-slate-900")}>
+        <div className="w-12 h-12 bg-teal-500 rounded-xl flex items-center justify-center text-white font-bold text-xl animate-pulse">D</div>
+        <p className="text-slate-400 text-sm">Loading your portfolio from Google Sheets...</p>
+        {syncError && (
+          <div className="max-w-sm text-center">
+            <p className="text-red-400 text-xs mt-2 px-4">{syncError}</p>
+            <button
+              onClick={loadFromSheets}
+              className="mt-3 px-4 py-2 bg-teal-500 text-white rounded-lg text-sm font-semibold hover:bg-teal-600"
+            >
+              Retry
+            </button>
+          </div>
+        )}
+      </div>
+    );
   }
 
   const renderSection = () => {
@@ -167,7 +314,7 @@ export default function App() {
         return (
           <ImportExport 
             transactions={transactions} 
-            setTransactions={setTransactions} 
+            setTransactions={handleSetTransactions}
             customStocks={customStocks}
             setCustomStocks={setCustomStocks}
             settings={settings}
@@ -300,6 +447,35 @@ export default function App() {
             </div>
 
             <div className="flex items-center gap-2 md:gap-4">
+
+              {/* Sync status indicator */}
+              {isSyncing && (
+                <div className="flex items-center gap-1.5 text-teal-500 text-xs font-medium">
+                  <RefreshCw size={14} className="animate-spin" />
+                  <span className="hidden sm:inline">Saving...</span>
+                </div>
+              )}
+              {syncError && !isSyncing && (
+                <div
+                  className="flex items-center gap-1.5 text-red-400 text-xs font-medium cursor-pointer"
+                  title={syncError}
+                  onClick={() => setSyncError(null)}
+                >
+                  <WifiOff size={14} />
+                  <span className="hidden sm:inline">Sync error</span>
+                </div>
+              )}
+
+              {/* Refresh button */}
+              <button
+                onClick={loadFromSheets}
+                disabled={isLoading || isSyncing}
+                className="p-2 rounded-lg text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors disabled:opacity-40"
+                title="Refresh from Google Sheets"
+              >
+                <RefreshCw size={18} className={isLoading ? "animate-spin" : ""} />
+              </button>
+
               <button
                 onClick={() => setIsAuthenticated(false)}
                 className="p-2 rounded-lg text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
@@ -318,13 +494,27 @@ export default function App() {
               
               <button
                 onClick={() => { setEditingTransaction(null); setIsAddModalOpen(true); }}
-                className="bg-teal-500 hover:bg-teal-600 text-white px-4 py-2 rounded-lg flex items-center gap-2 font-semibold transition-all shadow-md active:scale-95"
+                disabled={isSyncing}
+                className="bg-teal-500 hover:bg-teal-600 text-white px-4 py-2 rounded-lg flex items-center gap-2 font-semibold transition-all shadow-md active:scale-95 disabled:opacity-60"
               >
                 <Plus size={20} />
                 <span className="hidden sm:inline">Add Transaction</span>
               </button>
             </div>
           </header>
+
+          {/* Sync Error Banner */}
+          {syncError && (
+            <div className="bg-red-50 dark:bg-red-900/20 border-b border-red-200 dark:border-red-800 px-4 py-2 flex items-center justify-between">
+              <div className="flex items-center gap-2 text-red-600 dark:text-red-400 text-sm">
+                <AlertTriangle size={14} />
+                <span>{syncError}</span>
+              </div>
+              <button onClick={() => setSyncError(null)} className="text-red-400 hover:text-red-600">
+                <X size={14} />
+              </button>
+            </div>
+          )}
 
           {/* Content */}
           <div className="flex-1 overflow-y-auto p-4 md:p-8">
