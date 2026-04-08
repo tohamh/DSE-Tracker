@@ -28,7 +28,7 @@ import ErrorBoundary from "./components/ErrorBoundary";
 const GOOGLE_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbyalZ1aNYDf_vQKIMC0LGDXV-iJsxtJVAqpP6sATPdDSEYdTXPI_dxgFID9guxgmrt7/exec";
 // ============================================================
 
-const DEFAULT_PIN = "0923202350";
+const DEFAULT_PIN = "2350";
 const SYNC_INTERVAL = 10 * 60 * 1000; // 10 minutes
 
 async function sheetsAPI(body: object): Promise<{ success: boolean; data?: any; error?: string }> {
