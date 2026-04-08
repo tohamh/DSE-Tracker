@@ -206,13 +206,15 @@ export function calculatePortfolioStats(
   // ✅ FIX: explicit, unambiguous balance formula
   // Cash = what you deposited, minus what you withdrew, minus what you spent on stocks still held,
   //        plus what you got from selling, plus dividends, minus charges
-  const currentBalance =
+  
+const currentBalance =
     totalDeposits
     - totalWithdrawals
-    - totalHoldingCost   // cost of currently held stocks (locked in shares)
-    + totalDividends     // cash received from dividends
-    - totalCharges;      // cash paid in charges/fees
-
+    - totalHoldingCost
+    + totalRealizedPnL   // ✅ add back profit/loss from sold stocks
+    + totalDividends
+    - totalCharges;
+  
   const totalReturnSum = totalRealizedPnL + totalDividends - totalCharges;
 
   const overallReturnPercent = (activePortfolio === "Global" || activePortfolio === "Investment")
