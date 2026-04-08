@@ -1,4 +1,5 @@
-import { useState, useMemo, useEffect } from "react";
+const API_URL = "https://script.google.com/macros/s/AKfycbyiyC2JMwA_zGCNZZ6EdS9OdTBKesA6CLpcDy7JOfkLMcqPQv2xofrHvExBdIPgJMVi/exec " 
+  import { useState, useMemo, useEffect } from "react";
 import { 
   LayoutDashboard, 
   ArrowLeftRight, 
@@ -52,7 +53,7 @@ const DEFAULT_PIN = "0923202350";
 
 export default function App() {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
-  const [transactions, setTransactions] = useLocalStorage<Transaction[]>("dse_transactions", []);
+  const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [settings, setSettings] = useLocalStorage<Settings>("dse_settings", { commissionRate: 0.40 });
   const [customStocks, setCustomStocks] = useLocalStorage<CustomStock[]>("dse_custom_stocks", []);
   const [activeSection, setActiveSection] = useState<ActiveSection>("Dashboard");
@@ -96,13 +97,34 @@ export default function App() {
     }
   }, [transactions, setTransactions]);
 
+  const API_URL = "https://script.google.com/macros/s/AKfycbyiyC2JMwA_zGCNZZ6EdS9OdTBKesA6CLpcDy7JOfkLMcqPQv2xofrHvExBdIPgJMVi/exec";
+
+useEffect(() => {
+  const loadData = async () => {
+    try {
+      const res = await fetch(API_URL);
+      const data = await res.json();
+      setTransactions(data);
+    } catch (error) {
+      console.error("Error loading data:", error);
+    }
+  };
+
+  loadData();
+}, []);
+
   const handleAddTransaction = (newTransaction: Transaction) => {
     if (editingTransaction) {
       const updated = transactions.map(t => t.id === editingTransaction.id ? newTransaction : t);
       setTransactions(updated);
       setEditingTransaction(null);
     } else {
-      setTransactions([newTransaction, ...transactions]);
+      await fetch(API_URL, {
+  method: "POST",
+  body: JSON.stringify(newTransaction)
+})
+
+setTransactions([newTransaction, ...transactions])
     }
     setIsAddModalOpen(false);
   };
